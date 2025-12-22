@@ -1,931 +1,593 @@
-from telegram import Update, ReplyKeyboardRemove
-from telegram.ext import ContextTypes
-from telegram.constants import ParseMode
-from .models import *
-from .keyboards import *
 import logging
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    ContextTypes, CommandHandler, CallbackQueryHandler,
+    MessageHandler, filters, ConversationHandler
+)
+from telegram.error import BadRequest
 from asgiref.sync import sync_to_async
+from .models import TelegramUser, Category, MenuItem, Cart, CartItem, Order, OrderItem
 
 logger = logging.getLogger(__name__)
 
-# Асинхронные обертки для ORM запросов
-@sync_to_async
-def get_or_create_user(user_id, username, first_name, last_name):
-    """Создание или получение пользователя"""
-    return TelegramUser.objects.get_or_create(
-        user_id=user_id,
-        defaults={
-            'username': username,
-            'first_name': first_name,
-            'last_name': last_name
-        }
-    )
+# Константы состояний
+ORDER_TYPE, ADDRESS = range(2)
 
 @sync_to_async
-def get_categories():
-    """Получение всех категорий"""
-    return list(Category.objects.all().order_by('order'))
-
-@sync_to_async
-def get_category_by_id(category_id):
-    """Получение категории по ID"""
-    return Category.objects.get(id=category_id)
-
-@sync_to_async
-def get_products_by_category(category):
-    """Получение товаров категории"""
-    return list(Product.objects.filter(category=category, is_available=True))
-
-@sync_to_async
-def get_user_cart(user):
-    """Получение или создание корзины пользователя"""
-    cart, created = Cart.objects.get_or_create(user=user, is_active=True)
-    return cart
-
-@sync_to_async
-def get_cart_items_by_products(cart, products):
-    """Получение элементов корзины для товаров"""
-    return list(CartItem.objects.filter(cart=cart, product__in=products))
-
-@sync_to_async
-def get_cart_items(cart):
-    """Получение всех элементов корзины"""
-    return list(cart.items.all())
-
-@sync_to_async
-def get_cart_by_user(user):
-    """Получение активной корзины пользователя"""
-    return Cart.objects.filter(user=user, is_active=True).first()
-
-@sync_to_async
-def update_cart_item_quantity(cart_item_id, action):
-    """Обновление количества товара в корзине"""
-    try:
-        cart_item = CartItem.objects.select_related('product', 'cart').get(id=cart_item_id)
-        
-        if action == 'increase':
-            cart_item.quantity += 1
-            cart_item.save()
-        elif action == 'decrease':
-            if cart_item.quantity > 1:
-                cart_item.quantity -= 1
-                cart_item.save()
-            else:
-                # Если количество = 1 и нажали "уменьшить" - удаляем товар
-                cart_item.delete()
-                return None
-        return cart_item
-    except CartItem.DoesNotExist:
-        return None
-
-@sync_to_async
-def remove_cart_item(cart_item_id):
-    """Удаление товара из корзины"""
-    try:
-        cart_item = CartItem.objects.get(id=cart_item_id)
-        cart_item.delete()
-        return True
-    except CartItem.DoesNotExist:
-        return False
-
-@sync_to_async
-def clear_cart(user):
-    """Очистка всей корзины пользователя"""
-    try:
-        cart = Cart.objects.filter(user=user, is_active=True).first()
-        if cart:
-            cart.items.all().delete()
-            return True
-    except Exception as e:
-        logger.error(f"Error clearing cart: {e}")
-        return False
-    
-@sync_to_async
-def get_cart_item_by_id(cart_item_id):
-    """Получение элемента корзины по ID"""
-    try:
-        return CartItem.objects.select_related('product', 'cart').get(id=cart_item_id)
-    except CartItem.DoesNotExist:
-        return None
-
-@sync_to_async
-def get_cart_with_items(user):
-    """Получение корзины с элементами"""
-    try:
-        user = TelegramUser.objects.get(user_id=user)
-        cart = Cart.objects.filter(user=user, is_active=True).first()
-        if cart:
-            # Презагружаем элементы корзины
-            list(cart.items.all())  # Это вызовет запрос
-        return cart
-    except TelegramUser.DoesNotExist:
-        return None
-
-@sync_to_async
-def get_cart_items_with_products(cart):
-    """Получение элементов корзины с предзагруженными товарами"""
-    if not cart:
-        return []
-    return list(CartItem.objects.filter(cart=cart).select_related('product'))
-
-@sync_to_async
-def cart_has_items(cart):
-    """Проверка наличия товаров в корзине (асинхронная версия)"""
-    if not cart:
-        return False
-    return CartItem.objects.filter(cart=cart).exists()
-
-@sync_to_async
-def get_cart_total_price(cart):
-    """Получение общей суммы корзины"""
-    if not cart:
-        return 0
-    from django.db.models import Sum
-    result = CartItem.objects.filter(cart=cart).aggregate(
-        total=Sum('product__price') * Sum('quantity')
-    )
-    return result['total'] or 0
-
-@sync_to_async
-def get_cart_items_with_all_relations(cart):
-    """Получение элементов корзины со всеми связями"""
-    return list(CartItem.objects.filter(cart=cart).select_related('product', 'product__category'))
-
-@sync_to_async
-def get_cart_with_items_and_products(user):
-    """Получение корзины с элементами и товарами"""
-    cart = Cart.objects.filter(user=user, is_active=True).first()
-    if cart:
-        # Предзагружаем товары для элементов корзины
-        cart.items_with_products = list(CartItem.objects.filter(cart=cart).select_related('product'))
-    return cart
-
-@sync_to_async
-def get_cart_total_price_safe(cart):
-    """Безопасное получение общей суммы корзины"""
-    if not cart:
-        return 0
-    
-    # Используем агрегацию для расчета суммы одним запросом
-    from django.db.models import Sum, F
-    result = CartItem.objects.filter(cart=cart).aggregate(
-        total=Sum(F('product__price') * F('quantity'))
-    )
-    return result['total'] or 0
-
-@sync_to_async
-def get_cart_items_total(cart):
-    """Получение элементов корзины с расчетом суммы"""
-    if not cart:
-        return []
-    
-    # Получаем элементы с предзагруженными товарами
-    items = CartItem.objects.filter(cart=cart).select_related('product')
-    
-    # Создаем список с рассчитанными суммами
-    result = []
-    for item in items:
-        item.total_price = item.product.price * item.quantity
-        result.append(item)
-    
-    return result
-
-async def handle_cart_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка действий с товарами в корзине (только для корзины)"""
-    query = update.callback_query
-    await query.answer()
-    
-    # Определяем тип действия
-    if query.data.startswith('cart_increase_'):
-        cart_item_id = int(query.data.split('_')[2])
-        action = 'increase'
-        cart_item = await update_cart_item_quantity(cart_item_id, action)
-        
-    elif query.data.startswith('cart_decrease_'):
-        cart_item_id = int(query.data.split('_')[2])
-        action = 'decrease'
-        cart_item = await update_cart_item_quantity(cart_item_id, action)
-        
-    elif query.data.startswith('remove_'):
-        cart_item_id = int(query.data.split('_')[1])
-        success = await remove_cart_item(cart_item_id)
-        if success:
-            await query.answer("Товар удален из корзины ✅")
-        else:
-            await query.answer("Ошибка при удалении товара ❌")
-            
-    elif query.data == 'clear_cart':
-        user = await get_user_by_id_or_create(
-            user_id=query.from_user.id,
-            username=query.from_user.username,
-            first_name=query.from_user.first_name,
-            last_name=query.from_user.last_name
-        )
-        success = await clear_cart(user)
-        if success:
-            await query.answer("Корзина очищена ✅")
-            # Показываем пустую корзину
-            text = "🛒 Ваша корзина пуста"
-            keyboard = InlineKeyboardMarkup([[
-                InlineKeyboardButton("📋 Меню", callback_data="menu")
-            ]])
-            await query.edit_message_text(
-                text,
-                parse_mode=ParseMode.HTML,
-                reply_markup=keyboard
-            )
-            return
-        else:
-            await query.answer("Ошибка при очистке корзины ❌")
-            return
-    
-    # Обновляем отображение корзины
-    await show_cart(update, context)
-
-@sync_to_async
-def get_product_by_id(product_id):
-    """Получение товара по ID"""
-    return Product.objects.get(id=int(product_id))
-
-@sync_to_async
-def get_products_by_category_id(category_id):
-    """Получение товаров по ID категории"""
-    return list(Product.objects.filter(category_id=category_id, is_available=True))
-
-@sync_to_async
-def update_user_phone(user, phone):
-    """Обновление телефона пользователя"""
-    user.phone = phone
-    user.save()
+def get_or_create_user(chat_id, username=None):
+    user, _ = TelegramUser.objects.get_or_create(chat_id=chat_id)
+    if username and not user.name:
+        user.name = username
+        user.save()
     return user
 
 @sync_to_async
-def create_order(user, cart, address, phone, total_price):
-    """Создание заказа"""
-    order = Order.objects.create(
-        user=user,
-        cart=cart,
-        total_price=total_price,  # Используем переданную сумму
-        address=address,
-        phone=phone,
-        status='new'
+def get_menu_item(item_id):
+    return MenuItem.objects.select_related('category').get(id=item_id)
+
+@sync_to_async
+def get_all_categories():
+    return list(Category.objects.filter(items__isnull=False).distinct())
+
+@sync_to_async
+def get_items_by_category(slug):
+    return list(MenuItem.objects.filter(category__slug=slug, is_available=True))
+
+@sync_to_async
+def get_user_orders(user):
+    return list(
+        Order.objects
+        .filter(user=user)
+        .prefetch_related('items__item')  # опционально: для деталей
+        .order_by('-created_at')[:10]  # последние 10 заказов
     )
-    # Деактивируем корзину
-    cart.is_active = False
-    cart.save()
-    return order
 
 @sync_to_async
-def get_user_by_id(user_id):
-    """Получение пользователя по ID"""
-    return TelegramUser.objects.get(user_id=user_id)
-
-@sync_to_async
-def get_active_cart_by_user_id(user_id):
-    """Получение активной корзины пользователя по ID (асинхронная)"""
+def add_item_to_cart_db(user, item_id):
+    logger.info(f"Добавление товара {item_id} в корзину пользователя {user.chat_id}")
     try:
-        user = TelegramUser.objects.get(user_id=user_id)
-        return Cart.objects.filter(user=user, is_active=True).first()
-    except TelegramUser.DoesNotExist:
-        return None
-    
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    telegram_user, created = await get_or_create_user(
-        user_id=user.id,
-        username=user.username,
-        first_name=user.first_name,
-        last_name=user.last_name
-    )
-    
-    welcome_text = f"""
-    👋 Привет, {user.first_name}!
-
-    Добро пожаловать в наш сервис доставки еды!
-
-    🍔 <b>Основные команды:</b>
-    • /start - Главное меню
-    • /menu - Просмотр меню
-    • /cart - Просмотр корзины
-    • /orders - Мои заказы
-
-    Выберите действие из меню ниже 👇
-    """
-    
-    await update.message.reply_text(
-        welcome_text,
-        parse_mode=ParseMode.HTML,
-        reply_markup=main_menu()
-    )
-
-async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    categories = await get_categories()
-    
-    if not categories:
-        # Проверяем, откуда пришел запрос
-        if update.callback_query:
-            await update.callback_query.edit_message_text("Меню временно недоступно 😔")
-        else:
-            await update.message.reply_text("Меню временно недоступно 😔")
-        return
-    
-    text = "🍽 <b>Наше меню</b>\n\nВыберите категорию:"
-    
-    # Проверяем, откуда пришел запрос
-    if update.callback_query:
-        await update.callback_query.edit_message_text(
-            text,
-            parse_mode=ParseMode.HTML,
-            reply_markup=categories_keyboard(categories)
-        )
-    else:
-        await update.message.reply_text(
-            text,
-            parse_mode=ParseMode.HTML,
-            reply_markup=categories_keyboard(categories)
-        )
-
-async def show_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    category_id = int(query.data.split('_')[1])
-    category = await get_category_by_id(category_id)
-    
-    # Используем новую функцию с ID категории
-    products = await get_products_by_category_id(category_id)
-    
-    if not products:
-        await query.edit_message_text(
-            f"В категории '{category.name}' пока нет товаров 😔",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("◀️ Назад", callback_data="back_categories")
-            ]])
-        )
-        return
-    
-    # Получаем или создаем пользователя
-    user = await get_user_by_id_or_create(
-        user_id=query.from_user.id,
-        username=query.from_user.username,
-        first_name=query.from_user.first_name,
-        last_name=query.from_user.last_name
-    )
-    cart = await get_user_cart(user)
-    cart_items = await get_cart_items_by_products(cart, products)
-    
-    text = f"<b>{category.name}</b>\n\n{category.description or ''}"
-    await query.edit_message_text(
-        text,
-        parse_mode=ParseMode.HTML,
-        reply_markup=products_keyboard(products, cart_items)
-    )
-
-@sync_to_async
-def get_product_with_category(product_id):
-    """Получение товара с категорией по ID"""
-    return Product.objects.select_related('category').get(id=int(product_id))
-
-@sync_to_async 
-def get_category_for_product(product):
-    """Получение категории для товара"""
-    # Этот метод загружает связанную категорию, если она еще не загружена
-    return product.category
-
-@sync_to_async
-def get_products_by_category(category):
-    """Получение товаров категории"""
-    # Используем category.id вместо объекта category для безопасности
-    return list(Product.objects.filter(category_id=category.id, is_available=True))
-
-@sync_to_async
-def get_cart_items_with_products_from_user(user):
-    """Получение элементов корзины с товарами по пользователю"""
-    cart = Cart.objects.filter(user=user, is_active=True).first()
-    if not cart:
-        return []
-    return list(CartItem.objects.filter(cart=cart).select_related('product'))
-
-@sync_to_async
-def get_cart_items_with_products_data(user_id):
-    """Получение данных элементов корзины с товарами"""
-    try:
-        user = TelegramUser.objects.get(user_id=user_id)
-        cart = Cart.objects.filter(user=user, is_active=True).first()
-        if not cart:
-            return []
-        
-        # Получаем данные одним запросом с join
-        from django.db.models import F, Sum
-        cart_items = CartItem.objects.filter(cart=cart).select_related('product').values(
-            'id',
-            'quantity',
-            product_name=F('product__name'),
-            total_price=F('product__price') * F('quantity')
-        )
-        return list(cart_items)
-    except TelegramUser.DoesNotExist:
-        return []
-
-@sync_to_async
-def handle_cart_action_simple(cart, product, action):
-    """Обработка действий с корзиной из меню (добавление/удаление товаров)"""
-    if action == 'increase':
+        # ✅ select_related здесь — безопасно, т.к. внутри sync_to_async
+        item = MenuItem.objects.select_related('category').get(id=item_id)
+        cart, _ = Cart.objects.get_or_create(user=user)
         cart_item, created = CartItem.objects.get_or_create(
-            cart=cart,
-            product=product,
-            defaults={'quantity': 1}
+            cart=cart, item=item, defaults={'quantity': 1}
         )
         if not created:
             cart_item.quantity += 1
             cart_item.save()
-        return cart_item
-    
-    elif action == 'decrease':
-        try:
-            cart_item = CartItem.objects.get(cart=cart, product=product)
-            if cart_item.quantity > 1:
-                cart_item.quantity -= 1
-                cart_item.save()
-            else:
-                cart_item.delete()
-                return None
-            return cart_item
-        except CartItem.DoesNotExist:
-            return None
+        logger.info(f"Товар '{item.name}' добавлен. Количество: {cart_item.quantity}")
+        return item.name
+    except Exception as e:
+        logger.error(f"Ошибка при добавлении в корзину: {e}")
+        raise
 
-async def handle_product_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def decrease_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    try:
+        item_id = int(query.data.split('_', 1)[1])  # 'decrease_123'
+    except (ValueError, IndexError):
+        await query.answer("❌ Ошибка ID", show_alert=True)
+        return
+
+    chat_id = update.effective_chat.id
+    user = await get_or_create_user(chat_id)
+
+    try:
+        cart_item = await sync_to_async(
+            CartItem.objects.select_related('item').get
+        )(id=item_id, cart__user=user)
+
+        if cart_item.quantity > 1:
+            cart_item.quantity -= 1
+            await sync_to_async(cart_item.save)()
+        else:
+            await sync_to_async(cart_item.delete)()
+
+        # Обновляем корзину
+        await show_cart(update, context)
+
+    except CartItem.DoesNotExist:
+        await query.answer("❌ Товар уже удалён.", show_alert=True)
+    except Exception as e:
+        logger.error(f"Ошибка уменьшения количества: {e}")
+        await query.answer("⚠️ Не удалось изменить количество.", show_alert=True)
+
+async def remove_from_cart(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    try:
+        item_id = int(query.data.split('_', 1)[1])  # 'remove_123'
+    except (ValueError, IndexError):
+        await query.answer("❌ Некорректный ID", show_alert=True)
+        return
+
+    chat_id = update.effective_chat.id
+    user = await get_or_create_user(chat_id)
+
+    try:
+        deleted, _ = await sync_to_async(
+            CartItem.objects.filter(id=item_id, cart__user=user).delete)()
+
+        if deleted == 0:
+            await query.answer("❌ Товар не найден.", show_alert=True)
+        else:
+            await show_cart(update, context)  # обновить корзину
+    except Exception as e:
+        logger.error(f"Ошибка удаления: {e}")
+        await query.answer("⚠️ Не удалось удалить товар.", show_alert=True)
+
+@sync_to_async
+def get_user_cart(user):
+    try:
+        # ❗ Используем select_related('item'), чтобы избежать N+1 и ленивой загрузки
+        cart = Cart.objects.select_related('user').get(user=user)
+        items = list(cart.items.select_related('item').all())  # ← select_related('item')!
+        return cart, items
+    except Cart.DoesNotExist:
+        return None, []
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    await get_or_create_user(chat_id, update.effective_user.username)
+
+    categories = await get_all_categories()
+    keyboard = [
+        [InlineKeyboardButton(f"{cat.emoji} {cat.name}", callback_data=f'menu_{cat.slug}')]
+        for cat in categories
+    ]
+    keyboard += [
+        [InlineKeyboardButton("🛒 Корзина", callback_data='cart')],
+        [InlineKeyboardButton("📋 Мои заказы", callback_data='my_orders')],
+        [InlineKeyboardButton("ℹ️ О кофейне", callback_data='info')],
+    ]
+
+    text = "🌟 Добро пожаловать в *Coffee House Bot*!\n\nВыберите категорию:"
+    
+    if update.message:
+        await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    else:
+        # От callback query — редактируем или отправляем новое
+        try:
+            await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+        except Exception:
+            await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+
+async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    slug = query.data.split('_', 1)[1]  # 'menu_drinks' → 'drinks'
+    items = await get_items_by_category(slug)
+
+    if not items:
+        await query.edit_message_text(
+            "В этой категории пока нет доступных товаров.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='start')]])
+        )
+        return
+
+    keyboard = [
+        [InlineKeyboardButton(f"{i.name} — {i.price}₽", callback_data=f'item_{i.id}')]
+        for i in items
+    ]
+    keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data='start')])
+
+    await query.edit_message_text(
+        f"📜 Меню: *{next((c.name for c in await get_all_categories() if c.slug == slug), slug)}*",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown"
+    )
+
+async def show_item_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
-    # Получаем или создаем пользователя
-    user = await get_user_by_id_or_create(
-        user_id=query.from_user.id,
-        username=query.from_user.username,
-        first_name=query.from_user.first_name,
-        last_name=query.from_user.last_name
-    )
-    cart = await get_user_cart(user)
+    item_id = int(query.data.split('_')[1])
+    item = await sync_to_async(MenuItem.objects.select_related('category').get)(id=item_id)
     
-    action, product_id = query.data.split('_')
+    keyboard = [
+        [InlineKeyboardButton("➕ Добавить в корзину", callback_data=f'add_{item.id}')],
+        [InlineKeyboardButton("🔙 Назад к меню", callback_data=f'menu_{item.category.slug}')],  # ← slug!
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
     
-    # Получаем товар с категорией
-    product = await get_product_with_category(product_id)
-    
-    # Это функция для изменения количества в меню
-    await handle_cart_action_simple(cart, product, action)
-    
-    # Получаем категорию товара
-    category = await get_category_for_product(product)
-    
-    # Получаем товары по ID категории
-    products = await get_products_by_category_id(category.id)
-    
-    # Получаем элементы корзины
-    cart_items = await get_cart_items_by_products(cart, products)
-    
-    text = f"<b>{category.name}</b>"
+    message = f"*{item.name}*\n\n{item.description}\n\nЦена: *{item.price}₽*"
     await query.edit_message_text(
-        text,
-        parse_mode=ParseMode.HTML,
-        reply_markup=products_keyboard(products, cart_items)
+        message,
+        reply_markup=reply_markup,
+        parse_mode="Markdown"
+    )
+
+async def add_to_cart(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    item_id = int(query.data.split('_')[1])
+    chat_id = update.effective_chat.id
+    user = await get_or_create_user(chat_id)
+    
+    # Добавляем в корзину и получаем имя товара (всё внутри sync_to_async)
+    item_name = await add_item_to_cart_db(user, item_id)  # ← см. ниже
+    
+    keyboard = [
+        [InlineKeyboardButton("🛒 В корзину", callback_data='cart')],
+        [InlineKeyboardButton("➕ Ещё один", callback_data=f'add_{item_id}')],
+        [InlineKeyboardButton("🔙 Назад", callback_data='start')],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(
+        f"✅ *{item_name}* добавлен в корзину!",
+        reply_markup=reply_markup,
+        parse_mode="Markdown"
     )
 
 async def show_cart(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показать корзину с товарами"""
-    # Получаем или создаем пользователя
-    user = await get_user_by_id_or_create(
-        user_id=update.effective_user.id,
-        username=update.effective_user.username,
-        first_name=update.effective_user.first_name,
-        last_name=update.effective_user.last_name
+    query = update.callback_query
+    await query.answer()
+    
+    chat_id = update.effective_chat.id
+    user = await get_or_create_user(chat_id)
+    cart, items = await get_user_cart(user)
+    
+    # === СЛУЧАЙ 1: корзина пуста ===
+    if not items:
+        keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data='start')]]
+        try:
+            await query.edit_message_text(
+                "🛒 Ваша корзина пуста",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+        except BadRequest as e:
+            if "Message is not modified" in str(e):
+                # Игнорируем — сообщение уже актуально
+                logger.debug("Ignored 'Message is not modified' error")
+            else:
+                raise  # поднимаем остальные ошибки
+
+    # === СЛУЧАЙ 2: есть товары — формируем продвинутую клавиатуру ===
+    message = "🛒 *Ваша корзина:*\n\n"
+    total = 0
+    keyboard = []
+
+    for item in items:
+        item_total = item.item.price * item.quantity
+        total += item_total
+        message += f"• {item.item.name} ×{item.quantity} = {item_total}₽\n"
+
+        # === Кнопки управления ПОД каждым товаром ===
+        item_text = f"{item.item.name} ×{item.quantity}"
+        keyboard.append([InlineKeyboardButton(item_text, callback_data="noop")])
+
+        # Кнопки: [➖] [число] [➕] и [🗑️], если нужно
+        btn_row = []
+        # Кнопка уменьшения или удаления
+        if item.quantity > 1:
+            btn_row.append(InlineKeyboardButton("➖", callback_data=f"decrease_{item.id}"))
+        else:
+            btn_row.append(InlineKeyboardButton("🗑️", callback_data=f"remove_{item.id}"))
+        
+        btn_row.append(InlineKeyboardButton(str(item.quantity), callback_data="noop"))
+        btn_row.append(InlineKeyboardButton("➕", callback_data=f"add_{item.item.id}"))
+        
+        keyboard.append(btn_row)
+
+    message += f"\n*Итого: {total}₽*"
+
+    # Общие кнопки
+    keyboard.append([InlineKeyboardButton("🧹 Очистить корзину", callback_data="clear_cart")])
+    keyboard.append([
+        InlineKeyboardButton("✅ Оформить заказ", callback_data="checkout"),
+        InlineKeyboardButton("🔙 Назад", callback_data="start")
+    ])
+
+    await query.edit_message_text(
+        message,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown"
     )
-    
-    # Получаем элементы корзины с предзагруженными товарами
-    cart_items = await get_cart_items_with_products_from_user(user)
-    
-    if not cart_items:
-        text = "🛒 Ваша корзина пуста"
-        keyboard = InlineKeyboardMarkup([[
-            InlineKeyboardButton("📋 Меню", callback_data="menu")
-        ]])
-    else:
-        items_text = ""
-        total_price = 0
-        
-        for item in cart_items:
-            # Рассчитываем сумму для каждого элемента
-            item_total = item.product.price * item.quantity
-            items_text += f"• {item.product.name} x{item.quantity} = {item_total} ₽\n"
-            total_price += item_total
-        
-        text = f"""
-🛒 <b>Ваша корзина</b>
 
-{items_text}
-<b>Итого: {total_price} ₽</b>
+async def show_my_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
 
-<i>Используйте кнопки ниже для управления товарами:</i>
-"""
-        keyboard = cart_keyboard(cart_items)
-    
-    # Универсальная отправка сообщения
-    if update.callback_query:
-        await update.callback_query.edit_message_text(
-            text,
-            parse_mode=ParseMode.HTML,
-            reply_markup=keyboard
+    chat_id = update.effective_chat.id
+    user = await get_or_create_user(chat_id)
+    orders = await get_user_orders(user)
+
+    if not orders:
+        text = "📭 У вас пока нет заказов.\n\nСделайте первый заказ — мы приготовим его с любовью! ☕"
+        keyboard = []
+        for order in orders[:5]:  # показываем кнопки только для первых 5 (чтобы не перегружать)
+            status_short = {'pending': '⏳', 'confirmed': '✅', 'completed': '✔️', 'canceled': '❌'}.get(order.status, '❓')
+            btn_text = f"{status_short} Заказ #{order.id} — {order.total_price}₽"
+            keyboard.append([InlineKeyboardButton(btn_text, callback_data=f'order_{order.id}')])
+
+        keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data='start')])
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+        return
+
+    # Формируем список заказов
+    text = "📋 *Ваши заказы:*\n\n"
+    for order in orders:
+        # Статус (можно добавить в модель Order.choices, но пока просто текст)
+        status_map = {
+            'pending': '⏳ Обрабатывается',
+            'confirmed': '✅ Подтверждён',
+            'completed': '📦 Выполнен',
+            'canceled': '❌ Отменён',
+        }
+        status = status_map.get(order.status, order.status)
+
+        text += (
+            f"• *Заказ #{order.id}*\n"
+            f"  💰 {order.total_price}₽ | {status}\n"
+            f"  📅 {order.created_at.strftime('%d.%m.%Y %H:%M')}\n\n"
         )
+
+    keyboard = [
+        [InlineKeyboardButton("🔍 Подробности заказа", callback_data='order_details_info')],
+        [InlineKeyboardButton("🔙 Назад", callback_data='start')],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await query.edit_message_text(
+        text,
+        reply_markup=reply_markup,
+        parse_mode="Markdown"
+    )
+
+async def show_order_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    try:
+        order_id = int(query.data.split('_', 1)[1])
+    except (ValueError, IndexError):
+        await query.edit_message_text("❌ Неверный ID заказа.")
+        return
+
+    chat_id = update.effective_chat.id
+    user = await get_or_create_user(chat_id)
+
+    try:
+        # Получаем заказ с проверкой принадлежности
+        order = await sync_to_async(
+            Order.objects.select_related('user')
+            .prefetch_related('items__item')
+            .get
+        )(id=order_id, user=user)
+    except Order.DoesNotExist:
+        await query.edit_message_text("🔒 Заказ не найден или не принадлежит вам.")
+        return
+
+    # Формируем детали
+    status_map = {
+        'pending': '⏳ Обрабатывается',
+        'confirmed': '✅ Подтверждён менеджером',
+        'completed': '📦 Заказ выполнен',
+        'canceled': '❌ Отменён',
+    }
+    status = status_map.get(order.status, order.status)
+
+    text = f"📦 *Заказ #{order.id}*\n\n"
+    text += f"**Статус:** {status}\n"
+    text += f"**Сумма:** {order.total_price}₽\n"
+    text += f"**Дата:** {order.created_at.strftime('%d.%m.%Y %H:%M')}\n"
+
+    if order.order_type == 'delivery':
+        text += f"**Тип:** Доставка\n"
+        if order.address:
+            text += f"**Адрес:** {order.address}\n"
     else:
-        await update.message.reply_text(
-            text,
-            parse_mode=ParseMode.HTML,
-            reply_markup=keyboard
-        )
+        text += f"**Тип:** Самовывоз\n"
+
+    text += "\n**Состав заказа:**\n"
+    for item in order.items.all():
+        text += f"• {item.item.name} ×{item.quantity} — {item.item.price}₽\n"
+
+    keyboard = [[InlineKeyboardButton("🔙 Назад к заказам", callback_data='my_orders')]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await query.edit_message_text(
+        text,
+        reply_markup=reply_markup,
+        parse_mode="Markdown"
+    )
+
+async def noop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()  # просто закрываем "часики", ничего не делаем
 
 async def checkout_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
-    # Получаем или создаем пользователя
-    user = await get_user_by_id_or_create(
-        user_id=query.from_user.id,
-        username=query.from_user.username,
-        first_name=query.from_user.first_name,
-        last_name=query.from_user.last_name
+    keyboard = [
+        [InlineKeyboardButton("🏠 Доставка", callback_data='delivery')],
+        [InlineKeyboardButton("🏪 Самовывоз", callback_data='pickup')],
+        [InlineKeyboardButton("🔙 Назад", callback_data='cart')],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(
+        "🚚 *Выберите способ получения заказа:*",
+        reply_markup=reply_markup,
+        parse_mode="Markdown"
     )
-    
-    # Получаем активную корзину
-    cart = await get_cart_by_user(user)
-    
-    # Проверяем наличие товаров в корзине
-    has_items = await cart_has_items(cart) if cart else False
-    
-    if not has_items:
-        await query.edit_message_text(
-            "❌ Ваша корзина пуста! Сначала добавьте товары в корзину.",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("📋 В меню", callback_data="menu")
-            ]])
-        )
-        return
-    
-    # Сохраняем ID корзины
-    context.user_data['checkout_cart_id'] = cart.id
-    
-    if not user.phone:
-        # Используем INLINE клавиатуру для запроса телефона
-        keyboard = InlineKeyboardMarkup([[
-            InlineKeyboardButton(
-                "📱 Поделиться номером телефона", 
-                callback_data="request_phone"
-            )
-        ]])
-        
-        await query.edit_message_text(
-            "Для оформления заказа нам нужен ваш номер телефона 📱\n\n"
-            "Пожалуйста, нажмите кнопку ниже:",
-            reply_markup=keyboard
-        )
-    else:
-        context.user_data['checkout_step'] = 'address'
-        await query.edit_message_text(
-            f"📞 Ваш телефон: {user.phone}\n\n"
-            "Пожалуйста, введите адрес доставки:",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("◀️ Назад в корзину", callback_data="cart")
-            ]])
-        )
+    return ORDER_TYPE
 
-async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка полученного контакта"""
-    # Получаем или создаем пользователя
-    user = await get_user_by_id_or_create(
-        user_id=update.effective_user.id,
-        username=update.effective_user.username,
-        first_name=update.effective_user.first_name,
-        last_name=update.effective_user.last_name
-    )
+async def order_type_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
     
-    contact = update.message.contact
-    user = await update_user_phone(user, contact.phone_number)
+    context.user_data['order_type'] = query.data
     
-    # Удаляем reply-клавиатуру
-    await update.message.reply_text(
-        "✅ Номер телефона сохранен!",
-        reply_markup=ReplyKeyboardRemove()
-    )
-    
-    # Проверяем, находимся ли мы в процессе оформления заказа
-    checkout_step = context.user_data.get('checkout_step')
-    
-    if checkout_step == 'request_phone':
-        # Если был запрос телефона при оформлении заказа, продолжаем оформление
-        context.user_data['checkout_step'] = 'address'
-        
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text=f"📞 <b>Ваш телефон:</b> {user.phone}\n\n"
-                 "Теперь введите адрес доставки:",
-            parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("◀️ Назад в корзину", callback_data="cart")
-            ]])
+    if query.data == 'delivery':
+        await query.edit_message_text(
+            "🏠 *Введите адрес доставки:*",
+            parse_mode="Markdown"
         )
+        return ADDRESS
     else:
-        # Проверяем наличие активной корзины и товаров в ней
-        cart = await get_active_cart_by_user_id(update.effective_user.id)
-        
-        if cart:
-            # Проверяем наличие товаров в корзине (асинхронно)
-            has_items = await cart_has_items(cart)
-            if has_items:
-                # Если есть товары, предлагаем продолжить оформление
-                await context.bot.send_message(
-                    chat_id=update.effective_chat.id,
-                    text="📞 Номер телефона сохранен!\n\n"
-                         "У вас есть товары в корзине. Хотите оформить заказ?",
-                    reply_markup=InlineKeyboardMarkup([
-                        [
-                            InlineKeyboardButton("✅ Оформить заказ", callback_data="checkout"),
-                            InlineKeyboardButton("🛒 Посмотреть корзину", callback_data="cart")
-                        ]
-                    ])
-                )
-                return
-        
-        # Если нет активной корзины или она пуста
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text="📞 Номер телефона сохранен!\n\n"
-                 "Теперь вы можете добавлять товары в корзину и оформлять заказы.",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("📋 Меню", callback_data="menu"),
-                InlineKeyboardButton("🛒 Корзина", callback_data="cart")
-            ]])
-        )
+        return await create_order(update, context)
+
+async def address_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['address'] = update.message.text
+    return await create_order(update, context)
 
 @sync_to_async
-def get_user_by_id_or_create(user_id, username=None, first_name=None, last_name=None):
-    """Получение пользователя по ID или создание, если не существует"""
-    try:
-        return TelegramUser.objects.get(user_id=user_id)
-    except TelegramUser.DoesNotExist:
-        return TelegramUser.objects.create(
-            user_id=user_id,
-            username=username or "",
-            first_name=first_name or "",
-            last_name=last_name or ""
+def create_order_in_db(user, order_type, address, items):
+    total = sum(item.item.price * item.quantity for item in items)
+    
+    order = Order.objects.create(
+        user=user,
+        order_type=order_type,
+        address=address if order_type == 'delivery' else None,
+        total_price=total
+    )
+    
+    for item in items:
+        OrderItem.objects.create(
+            order=order,
+            item=item.item,
+            quantity=item.quantity
         )
+    
+    # Очистка корзины
+    Cart.objects.filter(user=user).delete()
+    
+    return order
 
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка текстовых сообщений"""
-    user = update.effective_user
+async def create_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    user = await get_or_create_user(chat_id)
+    cart, items = await get_user_cart(user)
     
-    # Если пользователь пишет боту в первый раз, создаем запись
-    telegram_user, created = await get_or_create_user(
-        user_id=user.id,
-        username=user.username,
-        first_name=user.first_name,
-        last_name=user.last_name
-    ) 
-    
-    # Проверяем, находится ли пользователь в процессе оформления заказа
-    checkout_step = context.user_data.get('checkout_step')
-    
-    if checkout_step == 'address':
-        await handle_address(update, context)
-        return
-    
-    # Проверяем, если пользователь отправил текст, который может быть адресом
-    # и у него есть активная корзина, начинаем оформление
-    cart = await get_active_cart_by_user_id(user.id)
-    
-    if cart:
-        # Проверяем наличие товаров в корзине
-        has_items = await cart_has_items(cart)
-        if has_items:
-            # Предлагаем начать оформление заказа
-            total_price = await get_cart_total_price(cart)
-            await update.message.reply_text(
-                f"У вас есть товары в корзине на сумму {total_price} ₽\n\n"
-                "Хотите оформить заказ?",
-                reply_markup=InlineKeyboardMarkup([
-                    [
-                        InlineKeyboardButton("✅ Оформить заказ", callback_data="checkout"),
-                        InlineKeyboardButton("🛒 Посмотреть корзину", callback_data="cart")
-                    ],
-                    [
-                        InlineKeyboardButton("📋 Продолжить покупки", callback_data="menu")
-                    ]
-                ])
-            )
-            return
-    
-    # Если это не адрес для оформления заказа и нет активной корзины, показываем стартовое сообщение
-    await update.message.reply_text(
-        f"👋 Привет, {user.first_name}!\n\n"
-        "Я бот для заказа еды. Используйте команды:\n"
-        "/start - Главное меню\n"
-        "/menu - Посмотреть меню\n"
-        "/cart - Корзина",
-        reply_markup=main_menu()
-    )
-
-async def handle_address(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.text == "◀️ Назад":
-        await show_cart(update, context)
-        return
-    
-    address = update.message.text
-    
-    # Получаем или создаем пользователя
-    user = await get_user_by_id_or_create(
-        user_id=update.effective_user.id,
-        username=update.effective_user.username,
-        first_name=update.effective_user.first_name,
-        last_name=update.effective_user.last_name
-    )
-    
-    # Проверяем, есть ли сохраненный ID корзины в context.user_data
-    cart_id = context.user_data.get('checkout_cart_id')
-    
-    if cart_id:
-        # Если есть сохраненный ID, используем его
-        cart = await sync_to_async(Cart.objects.get)(id=cart_id)
-    else:
-        # Если нет сохраненного ID, ищем активную корзину пользователя
-        cart = await get_active_cart_by_user_id(update.effective_user.id)
-        
-        # Используем асинхронную проверку наличия товаров
-        if not cart:
-            await update.message.reply_text(
-                "❌ У вас нет активной корзины. Сначала добавьте товары в корзину.",
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("📋 В меню", callback_data="menu")
-                ]])
-            )
-            return
-        
-        # Проверяем наличие товаров в корзине
-        cart_items = await get_cart_items_with_products(cart)
-        if not cart_items:
-            await update.message.reply_text(
-                "❌ Ваша корзина пуста. Добавьте товары перед оформлением заказа.",
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("📋 В меню", callback_data="menu")
-                ]])
-            )
-            return
-        
-        # Сохраняем ID корзины для последующих шагов
-        context.user_data['checkout_cart_id'] = cart.id
-    
-    # Сохраняем адрес
-    context.user_data['address'] = address
-    
-    # Получаем элементы корзины
-    cart_items = await get_cart_items_with_products(cart)
-    
-    # Проверяем, есть ли товары в корзине
-    if not cart_items:
-        await update.message.reply_text(
-            "❌ Ваша корзина пуста. Добавьте товары перед оформлением заказа.",
+    if not items:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="Ваша корзина пуста! Сначала добавьте товары.",
             reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("📋 В меню", callback_data="menu")
+                InlineKeyboardButton("🔙 В меню", callback_data='start')
             ]])
         )
-        return
+        return ConversationHandler.END
     
-    # Показываем подтверждение заказа
-    items_text = "\n".join([
-        f"• {item.product.name} x{item.quantity} - {item.total_price} ₽"
-        for item in cart_items
-    ])
+    order_type = context.user_data['order_type']
+    address = context.user_data.get('address', '')
     
-    # Получаем телефон пользователя
-    phone = user.phone or "Не указан"
+    order = await create_order_in_db(user, order_type, address, items)
     
-    # Получаем общую сумму корзины
-    total_price = sum(item.total_price for item in cart_items)
-    
-    text = f"""
-✅ <b>Подтверждение заказа</b>
-
-<b>Товары:</b>
-{items_text}
-
-<b>Адрес доставки:</b> {address}
-<b>Телефон:</b> {phone}
-<b>Итого: {total_price} ₽</b>
-
-Подтвердить заказ?
-"""
-    
-    # Устанавливаем шаг оформления заказа
-    context.user_data['checkout_step'] = 'confirmation'
-    
-    # Удаляем клавиатуру "Назад" если она есть
-    reply_markup = order_confirmation_keyboard()
-    
-    await update.message.reply_text(
-        text,
-        parse_mode=ParseMode.HTML,
-        reply_markup=reply_markup
+    # Формирование сообщения о заказе
+    order_type_text = "Доставка" if order_type == 'delivery' else "Самовывоз"
+    message = (
+        f"✅ *Заказ #{order.id} успешно оформлен!*\n\n"
+        f"*Тип заказа:* {order_type_text}\n"
     )
+    
+    if address:
+        message += f"*Адрес:* {address}\n"
+    
+    message += (
+        f"*Сумма:* {order.total_price}₽\n\n"
+        "⏳ В ближайшее время с вами свяжется оператор для подтверждения заказа.\n\n"
+        "Благодарим за выбор Coffee House! 😊"
+    )
+    
+    keyboard = [[InlineKeyboardButton("🔙 В главное меню", callback_data='start')]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    if update.message:
+        await update.message.reply_text(
+            message,
+            reply_markup=reply_markup,
+            parse_mode="Markdown"
+        )
+    else:
+        query = update.callback_query
+        await query.edit_message_text(
+            message,
+            reply_markup=reply_markup,
+            parse_mode="Markdown"
+        )
+    
+    return ConversationHandler.END
 
-async def confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def show_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
-    # Получаем или создаем пользователя
-    user = await get_user_by_id_or_create(
-        user_id=query.from_user.id,
-        username=query.from_user.username,
-        first_name=query.from_user.first_name,
-        last_name=query.from_user.last_name
+    info = (
+        "ℹ️ *О нашей кофейне*\n\n"
+        "☕ *Coffee House* — место, где рождается настроение!\n\n"
+        "📍 *Адрес:* ул. Ароматная, 42\n"
+        "🕒 *Режим работы:*\n"
+        "   Пн-Пт: 8:00 - 22:00\n"
+        "   Сб-Вс: 9:00 - 23:00\n\n"
+        "📞 *Телефон:* +7 (XXX) XXX-XX-XX\n"
+        "🌐 *Сайт:* coffeehouse.example.com"
     )
     
-    cart = await sync_to_async(Cart.objects.get)(id=context.user_data['checkout_cart_id'])
+    keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data='start')]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
     
-    # Получаем элементы корзины для расчета общей суммы
-    cart_items = await get_cart_items_with_products(cart)
-    
-    # Рассчитываем общую сумму вручную
-    total_price = sum(item.total_price for item in cart_items)
-    
-    # Создаем заказ
-    order = await create_order(
-        user=user,
-        cart=cart,
-        address=context.user_data['address'],
-        phone=user.phone,
-        total_price=total_price
-    )
-    
-    # Отправляем подтверждение
     await query.edit_message_text(
-        f"🎉 <b>Заказ #{order.id} оформлен!</b>\n\n"
-        f"Мы начали готовить ваш заказ. Ожидайте доставку по адресу:\n"
-        f"{order.address}\n\n"
-        f"Статус заказа можно отслеживать в разделе 'Мои заказы'",
-        parse_mode=ParseMode.HTML
+        info,
+        reply_markup=reply_markup,
+        parse_mode="Markdown"
     )
-    
-    # Очищаем данные
-    context.user_data.clear()
 
-async def request_phone_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def clear_cart(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
-    # Отправляем сообщение с ReplyKeyboardMarkup для запроса контакта
-    await query.edit_message_text(
-        "Пожалуйста, нажмите кнопку ниже, чтобы поделиться номером телефона:"
-    )
+    chat_id = update.effective_chat.id
+    user = await get_or_create_user(chat_id)
     
-    # Отправляем новое сообщение с кнопкой запроса контакта
-    # (нельзя использовать reply_markup в edit_message_text для ReplyKeyboard)
-    keyboard = ReplyKeyboardMarkup(
-        [[KeyboardButton("📱 Отправить номер телефона", request_contact=True)]],
-        resize_keyboard=True,
-        one_time_keyboard=True
-    )
+    try:
+        await sync_to_async(Cart.objects.filter(user=user).delete)()
+        message = "✅ Корзина успешно очищена!"
+    except Exception as e:
+        message = f"Ошибка при очистке корзины: {str(e)}"
     
-    # Отправляем новое сообщение с кнопкой
-    await context.bot.send_message(
-        chat_id=query.message.chat_id,
-        text="Нажмите кнопку, чтобы поделиться номером:",
-        reply_markup=keyboard
-    )
+    keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data='start')]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(message, reply_markup=reply_markup)
 
-async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка всех callback запросов"""
-    query = update.callback_query
-    data = query.data
+def register_handlers(application):
+    """Регистрация всех обработчиков бота"""
+    # Обработчики команд
+    application.add_handler(CommandHandler("start", start))
     
-    if data == 'menu' or data == 'back_categories':
-        await show_menu(update, context)
-    elif data.startswith('category_'):
-        await show_category(update, context)
-    elif data.startswith('increase_') or data.startswith('decrease_'):
-        # Это действия в меню (добавление/удаление из корзины)
-        await handle_product_action(update, context)
-    elif data == 'cart':
-        await show_cart(update, context)
-    elif data == 'checkout':
-        await checkout_start(update, context)
-    elif data == 'request_phone':
-        await request_phone_handler(update, context)
-    elif data == 'confirm_order':
-        await confirm_order(update, context)
-    elif data == 'cancel_order':
-        await query.edit_message_text("Заказ отменен")
-        await show_cart(update, context)
-    # Добавляем обработчики для действий в корзине
-    elif data.startswith('cart_increase_') or \
-         data.startswith('cart_decrease_') or \
-         data.startswith('remove_') or \
-         data == 'clear_cart':
-        # Это действия внутри самой корзины
-        await handle_cart_action(update, context)
+    # Обработчики кнопок меню
+    application.add_handler(CallbackQueryHandler(start, pattern='^start$'))
+    application.add_handler(CallbackQueryHandler(show_menu, pattern='^menu_'))
+    application.add_handler(CallbackQueryHandler(show_item_details, pattern='^item_\\d+$'))
+    application.add_handler(CallbackQueryHandler(add_to_cart, pattern='^add_\\d+$'))
+    application.add_handler(CallbackQueryHandler(show_cart, pattern='^cart$'))
+    application.add_handler(CallbackQueryHandler(show_info, pattern='^info$'))
+    application.add_handler(CallbackQueryHandler(clear_cart, pattern='^clear_cart$'))
+    application.add_handler(CallbackQueryHandler(show_my_orders, pattern='^my_orders$'))
+    application.add_handler(CallbackQueryHandler(show_order_details, pattern=r'^order_\d+$'))
+    application.add_handler(CallbackQueryHandler(decrease_quantity, pattern=r'^decrease_\d+$'))
+    application.add_handler(CallbackQueryHandler(remove_from_cart, pattern=r'^remove_\d+$'))
+    application.add_handler(CallbackQueryHandler(noop, pattern='^noop$'))
+
+    # Диалог оформления заказа
+    conv_handler = ConversationHandler(
+        entry_points=[CallbackQueryHandler(checkout_start, pattern='^checkout$')],
+        states={
+            ORDER_TYPE: [CallbackQueryHandler(order_type_selected, pattern='^(delivery|pickup)$')],
+            ADDRESS: [MessageHandler(filters.TEXT & ~filters.COMMAND, address_received)],
+        },
+        fallbacks=[CommandHandler('cancel', lambda u, c: ConversationHandler.END)],
+        per_chat=True,
+        per_message=False
+    )
+    
+    application.add_handler(conv_handler)
