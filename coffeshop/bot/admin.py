@@ -18,8 +18,20 @@ class OrderAdmin(admin.ModelAdmin):
     list_display = ('id', 'user', 'order_type', 'total_price', 'status')
     list_filter = ('order_type', 'status')
 
+@admin.register(Cart)
+class CartAdmin(admin.ModelAdmin):
+    list_display = ('id', 'user', 'created_at')
+    list_filter = ('user')
+
+@admin.register(CartItem)
+class CartItemAdmin(admin.ModelAdmin):
+    list_display = ('id', 'cart', 'item', 'quantity')
+    list_filter = ('cart', 'item')
+
+@admin.register(OrderItem)
+class OrderItemAdmin(admin.ModelAdmin):
+    list_display = ('id', 'order', 'item', 'quantity')
+    list_filter = ('order', 'item')
+
 # Зарегистрируйте остальные модели аналогично
 admin.site.register(TelegramUser)
-admin.site.register(Cart)
-admin.site.register(CartItem)
-admin.site.register(OrderItem)

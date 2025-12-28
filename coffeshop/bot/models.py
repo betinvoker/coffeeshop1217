@@ -54,6 +54,11 @@ class Cart(models.Model):
     user = models.OneToOneField(TelegramUser, on_delete=models.CASCADE)
     created_at = models.DateTimeField(auto_now_add=True)
     
+    class Meta:
+        verbose_name = "Корзина клиента"
+        verbose_name_plural = "Корзины клиентов"
+        ordering = ['user']
+
     def total_price(self):
         return sum(item.total_price() for item in self.items.all())
 
@@ -62,6 +67,11 @@ class CartItem(models.Model):
     item = models.ForeignKey(MenuItem, on_delete=models.CASCADE)
     quantity = models.PositiveIntegerField(default=1)
     
+    class Meta:
+        verbose_name = "Элементы корзины клиента"
+        verbose_name_plural = "Элементы корзин клиентов"
+        ordering = ['cart', 'item']
+
     def total_price(self):
         return self.item.price * self.quantity
 
@@ -90,6 +100,11 @@ class Order(models.Model):
         choices=STATUS_CHOICES,
         default='pending'
     )
+
+    class Meta:
+        verbose_name = "Заказ клиента"
+        verbose_name_plural = "Заказы клиентов"
+        ordering = ['user', 'order_type', 'address', 'total_price', 'status']
     
     def __str__(self):
         return f"Order #{self.id} - {self.get_order_type_display()}"
@@ -98,3 +113,8 @@ class OrderItem(models.Model):
     order = models.ForeignKey(Order, related_name='items', on_delete=models.CASCADE)
     item = models.ForeignKey(MenuItem, on_delete=models.CASCADE)
     quantity = models.PositiveIntegerField()
+
+    class Meta:
+        verbose_name = "Элемент заказа клиента"
+        verbose_name_plural = "Элементы заказов клиентов"
+        ordering = ['order', 'item']
