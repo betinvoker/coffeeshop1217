@@ -1,0 +1,14 @@
+# Запуск бота
+python manage.py run_bot
+
+# Запуск приложения
+python manage.py runserver
+
+# 1. Создайте новую миграцию
+python manage.py makemigrations bot
+# 2. Примените миграции
+python manage.py migrate
+# 3. Создайте суперпользователя
+python manage.py createsuperuser
+# 4. Проверьте, что все работает
+python manage.py check

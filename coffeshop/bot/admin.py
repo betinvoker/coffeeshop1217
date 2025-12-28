@@ -21,7 +21,7 @@ class OrderAdmin(admin.ModelAdmin):
 @admin.register(Cart)
 class CartAdmin(admin.ModelAdmin):
     list_display = ('id', 'user', 'created_at')
-    list_filter = ('user')
+    list_filter = ('user',)
 
 @admin.register(CartItem)
 class CartItemAdmin(admin.ModelAdmin):
