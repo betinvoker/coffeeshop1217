@@ -1,10 +1,13 @@
+import os 
 import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from pathlib import Path
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
 from telegram.ext import (
     ContextTypes, CommandHandler, CallbackQueryHandler,
     MessageHandler, filters, ConversationHandler
 )
 from telegram.error import BadRequest
+from telegram.constants import ParseMode
 from asgiref.sync import sync_to_async
 from .models import TelegramUser, Category, MenuItem, Cart, CartItem, Order, OrderItem
 
@@ -66,7 +69,7 @@ async def decrease_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     try:
-        item_id = int(query.data.split('_', 1)[1])  # 'decrease_123'
+        item_id = int(query.data.split('_', 1)[1])
     except (ValueError, IndexError):
         await query.answer("❌ Ошибка ID", show_alert=True)
         return
@@ -85,7 +88,7 @@ async def decrease_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await sync_to_async(cart_item.delete)()
 
-        # Обновляем корзину
+        # Перезагружаем и показываем корзину
         await show_cart(update, context)
 
     except CartItem.DoesNotExist:
@@ -99,7 +102,7 @@ async def remove_from_cart(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     try:
-        item_id = int(query.data.split('_', 1)[1])  # 'remove_123'
+        item_id = int(query.data.split('_', 1)[1])
     except (ValueError, IndexError):
         await query.answer("❌ Некорректный ID", show_alert=True)
         return
@@ -114,7 +117,7 @@ async def remove_from_cart(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if deleted == 0:
             await query.answer("❌ Товар не найден.", show_alert=True)
         else:
-            await show_cart(update, context)  # обновить корзину
+            await show_cart(update, context)  # ← обновить корзину
     except Exception as e:
         logger.error(f"Ошибка удаления: {e}")
         await query.answer("⚠️ Не удалось удалить товар.", show_alert=True)
@@ -157,15 +160,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await query.answer()  # ← всегда отвечаем на callback
 
-    slug = query.data.split('_', 1)[1]  # 'menu_drinks' → 'drinks'
+    slug = query.data.split('_', 1)[1]
     items = await get_items_by_category(slug)
 
     if not items:
-        await query.edit_message_text(
-            "В этой категории пока нет доступных товаров.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='start')]])
+        keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data='start')]]
+        # ❌ НЕ редактируем — а отправляем новое сообщение
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="В этой категории пока нет доступных товаров.",
+            reply_markup=InlineKeyboardMarkup(keyboard)
         )
         return
 
@@ -175,31 +181,84 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data='start')])
 
-    await query.edit_message_text(
-        f"📜 Меню: *{next((c.name for c in await get_all_categories() if c.slug == slug), slug)}*",
+    # ✅ Отправляем НОВОЕ сообщение вместо редактирования
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text=f"📜 Меню: *{next((c.name for c in await get_all_categories() if c.slug == slug), slug)}*",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="Markdown"
     )
 
+    # ✅ Опционально: удалить старое сообщение (но осторожно!)
+    try:
+        await query.message.delete()
+    except BadRequest as e:
+        if "Message can't be deleted" not in str(e):
+            logger.warning(f"Не удалось удалить старое сообщение: {e}")
+
 async def show_item_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
-    
+    await query.answer()  # обязательно — чтобы "часики" пропали
+
     item_id = int(query.data.split('_')[1])
     item = await sync_to_async(MenuItem.objects.select_related('category').get)(id=item_id)
-    
+
+    # Формируем подпись
+    caption = f"*{item.name}*\n\n"
+    if item.description:
+        caption += f"{item.description[:900]}\n\n"
+    caption += f"Цена: *{item.price}₽*"
+
     keyboard = [
         [InlineKeyboardButton("➕ Добавить в корзину", callback_data=f'add_{item.id}')],
-        [InlineKeyboardButton("🔙 Назад к меню", callback_data=f'menu_{item.category.slug}')],  # ← slug!
+        [InlineKeyboardButton("🔙 Назад к меню", callback_data=f'menu_{item.category.slug}')],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    message = f"*{item.name}*\n\n{item.description}\n\nЦена: *{item.price}₽*"
-    await query.edit_message_text(
-        message,
-        reply_markup=reply_markup,
-        parse_mode="Markdown"
-    )
+    chat_id = update.effective_chat.id
+
+    try:
+        # ✅ Проверяем изображение
+        if item.image and os.path.exists(item.image.path):
+            # 📸 Отправляем НОВОЕ сообщение с фото (не редактируем и не удаляем старое!)
+            with open(item.image.path, 'rb') as photo_file:
+                await context.bot.send_photo(
+                    chat_id=chat_id,
+                    photo=photo_file,
+                    caption=caption,
+                    reply_markup=reply_markup,
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            # ✅ Опционально: отредактировать старое сообщение → "Подробнее → фото отправлено выше"
+            try:
+                await query.edit_message_text(
+                    "📸 *Фото товара отправлено выше 👆*",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("🔙 Назад", callback_data=f'menu_{item.category.slug}')
+                    ]]),
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            except BadRequest as e:
+                if "Message is not modified" not in str(e):
+                    logger.warning(f"Не удалось обновить старое сообщение: {e}")
+            return
+
+        # 📝 Если фото нет — редактируем как раньше
+        await query.edit_message_text(
+            caption,
+            reply_markup=reply_markup,
+            parse_mode=ParseMode.MARKDOWN
+        )
+
+    except Exception as e:
+        logger.error(f"Ошибка при отправке товара {item_id}: {e}")
+        # Отправляем текстом в любом случае
+        fallback = f"⚠️ Ошибка загрузки фото.\n\n{caption}"
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=fallback,
+            reply_markup=reply_markup,
+            parse_mode=ParseMode.MARKDOWN
+        )
 
 async def add_to_cart(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -209,8 +268,8 @@ async def add_to_cart(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user = await get_or_create_user(chat_id)
     
-    # Добавляем в корзину и получаем имя товара (всё внутри sync_to_async)
-    item_name = await add_item_to_cart_db(user, item_id)  # ← см. ниже
+    # Добавляем в корзину и получаем имя товара
+    item_name = await add_item_to_cart_db(user, item_id)
     
     keyboard = [
         [InlineKeyboardButton("🛒 В корзину", callback_data='cart')],
@@ -219,8 +278,12 @@ async def add_to_cart(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    await query.edit_message_text(
-        f"✅ *{item_name}* добавлен в корзину!",
+    text = f"✅ *{item_name}* добавлен в корзину!"
+    
+    # ✅ ИСПОЛЬЗУЕМ safe_edit_or_send вместо query.edit_message_text
+    await safe_edit_or_send(
+        query,
+        text,
         reply_markup=reply_markup,
         parse_mode="Markdown"
     )
@@ -237,9 +300,11 @@ async def show_cart(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not items:
         keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data='start')]]
         try:
-            await query.edit_message_text(
-                "🛒 Ваша корзина пуста",
-                reply_markup=InlineKeyboardMarkup(keyboard)
+            await safe_edit_or_send(
+                query,
+                message,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode="Markdown"
             )
         except BadRequest as e:
             if "Message is not modified" in str(e):
@@ -413,7 +478,9 @@ async def checkout_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    await query.edit_message_text(
+    # ✅ Безопасная отправка
+    await safe_edit_or_send(
+        query,
         "🚚 *Выберите способ получения заказа:*",
         reply_markup=reply_markup,
         parse_mode="Markdown"
@@ -427,12 +494,15 @@ async def order_type_selected(update: Update, context: ContextTypes.DEFAULT_TYPE
     context.user_data['order_type'] = query.data
     
     if query.data == 'delivery':
-        await query.edit_message_text(
-            "🏠 *Введите адрес доставки:*",
+        # ✅ Отправляем запрос адреса как НОВОЕ сообщение (не редактируем!)
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text="🏠 *Введите адрес доставки:*",
             parse_mode="Markdown"
         )
         return ADDRESS
     else:
+        # Для самовывоза — сразу создаём заказ
         return await create_order(update, context)
 
 async def address_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -541,6 +611,34 @@ async def show_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
+async def safe_edit_or_send(query: CallbackQuery, text: str, reply_markup=None, parse_mode=None):
+    try:
+        await query.edit_message_text(
+            text=text,
+            reply_markup=reply_markup,
+            parse_mode=parse_mode
+        )
+    except BadRequest as e:
+        error_msg = str(e).lower()
+        # 1. Нет текста (медиа-сообщение)
+        if "there is no text in the message to edit" in error_msg:
+            await query.get_bot().send_message(
+                chat_id=query.message.chat_id,
+                text=text,
+                reply_markup=reply_markup,
+                parse_mode=parse_mode
+            )
+            try:
+                await query.message.delete()
+            except BadRequest:
+                pass
+        # 2. Сообщение не изменилось → просто игнорируем
+        elif "message is not modified" in error_msg:
+            # ✅ Ничего не делаем — сообщение уже актуально
+            logger.debug("Ignored 'Message is not modified'")
+        else:
+            raise  # поднимаем другие ошибки
+
 async def clear_cart(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -552,12 +650,18 @@ async def clear_cart(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await sync_to_async(Cart.objects.filter(user=user).delete)()
         message = "✅ Корзина успешно очищена!"
     except Exception as e:
-        message = f"Ошибка при очистке корзины: {str(e)}"
-    
+        logger.error(f"Ошибка при очистке корзины: {e}")
+        message = "❌ Не удалось очистить корзину. Попробуйте позже."
+
     keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data='start')]]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await query.edit_message_text(message, reply_markup=reply_markup)
+
+    # ✅ Безопасная отправка
+    await safe_edit_or_send(
+        query,
+        message,
+        reply_markup=reply_markup
+    )
 
 def register_handlers(application):
     """Регистрация всех обработчиков бота"""

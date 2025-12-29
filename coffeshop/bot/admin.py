@@ -1,6 +1,7 @@
 # bot_app/admin.py
 from django.contrib import admin
 from .models import TelegramUser, Category, MenuItem, Cart, CartItem, Order, OrderItem
+from django.utils.html import format_html
 
 @admin.register(Category)
 class CategoryAdmin(admin.ModelAdmin):
@@ -9,9 +10,21 @@ class CategoryAdmin(admin.ModelAdmin):
 
 @admin.register(MenuItem)
 class MenuItemAdmin(admin.ModelAdmin):
-    list_display = ('name', 'category', 'price', 'is_available')
-    list_filter = ('category', 'is_available')
-    search_fields = ('name',)
+    list_display = ['name', 'category', 'price', 'is_available', 'image_thumbnail']
+    list_filter = ['category', 'is_available']
+    readonly_fields = ['image_preview']
+
+    def image_thumbnail(self, obj):
+        if obj.image:
+            return format_html('<img src="{}" style="max-height: 50px;"/>', obj.image.url)
+        return "-"
+    image_thumbnail.short_description = "Превью"
+
+    def image_preview(self, obj):
+        if obj.image:
+            return format_html('<img src="{}" style="max-width: 300px;"/>', obj.image.url)
+        return "-"
+    image_preview.short_description = "Просмотр"
 
 @admin.register(Order)
 class OrderAdmin(admin.ModelAdmin):

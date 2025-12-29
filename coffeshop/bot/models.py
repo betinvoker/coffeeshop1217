@@ -39,6 +39,13 @@ class MenuItem(models.Model):
         related_name='items',
         verbose_name="Категория"
     )
+    image = models.ImageField(
+        "Изображение",
+        upload_to='menu_items/',      # сохраняется в MEDIA_ROOT/menu_items/
+        blank=True,
+        null=True,
+        help_text="Рекомендуемый размер: 400x400px"
+    )
     is_available = models.BooleanField("Доступен", default=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -49,6 +56,13 @@ class MenuItem(models.Model):
 
     def __str__(self):
         return f"{self.name} ({self.category.name})"
+    
+    @property
+    def image_url(self):
+        """Возвращает URL изображения или None"""
+        if self.image and hasattr(self.image, 'url'):
+            return self.image.url
+        return None
 
 class Cart(models.Model):
     user = models.OneToOneField(TelegramUser, on_delete=models.CASCADE)
@@ -94,7 +108,6 @@ class Order(models.Model):
     address = models.CharField(max_length=255, blank=True, null=True)
     total_price = models.DecimalField(max_digits=8, decimal_places=2)
     created_at = models.DateTimeField(auto_now_add=True)
-    status = models.CharField(max_length=20, default='pending')  # pending, completed, canceled
     status = models.CharField(
         max_length=20,
         choices=STATUS_CHOICES,
