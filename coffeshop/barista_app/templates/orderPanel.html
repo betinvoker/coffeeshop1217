@@ -1,0 +1,135 @@
+{% extends 'base.html' %}
+{% load static %}
+{% block title %}Панель заказов • CoffeeShop{% endblock %}
+
+{% block content %}
+<body class="bg-light">
+    <div class="container py-4">
+        <div class="d-flex justify-content-between align-items-center mb-4">
+            <h1><i class="bi bi-cup-hot"></i> Панель заказов</h1>
+            <div>
+                <span class="me-3">Привет, {{ user.username }}!</span>
+                <a href="{% url 'logout' %}" class="btn btn-outline-danger btn-sm">
+                    <i class="bi bi-box-arrow-right"></i> Выйти
+                </a>
+                <button class="btn btn-primary btn-sm ms-2" onclick="location.reload()">
+                    <i class="bi bi-arrow-clockwise"></i> Обновить
+                </button>
+            </div>
+        </div>
+
+        <!-- Форма фильтрации -->
+        <div class="card mb-4">
+            <div class="card-body">
+                <form method="get" class="row g-3">
+                    <div class="col-md-4">
+                        <label for="order_id" class="form-label">Номер заказа</label>
+                        <input type="text" 
+                            class="form-control" 
+                            id="order_id" 
+                            name="order_id" 
+                            value="{{ current_filters.order_id }}"
+                            placeholder="Введите ID">
+                    </div>
+                    <div class="col-md-4">
+                        <label for="status" class="form-label">Статус</label>
+                        <select class="form-select" id="status" name="status">
+                            <option value="">Все статусы</option>
+                            {% for value, label in status_choices %}
+                                <option value="{{ value }}" {% if current_filters.status == value %}selected{% endif %}>
+                                    {{ label }}
+                                </option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div class="col-md-4 d-flex align-items-end">
+                        <button type="submit" class="btn btn-primary w-100">
+                            <i class="bi bi-funnel"></i> Применить
+                        </button>
+                        {% if current_filters.order_id or current_filters.status %}
+                            <a href="{% url 'barista_app:order_panel' %}" class="btn btn-outline-secondary ms-2">
+                                <i class="bi bi-x-circle"></i> Сбросить
+                            </a>
+                        {% endif %}
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        {% if orders %}
+            <div class="row g-3">
+                {% for order in orders %}
+                    {% with status_class='status-'|add:order.status %}
+                    <div class="col-12 col-md-6 col-lg-4">
+                        <div class="card order-card shadow-sm {{ status_class }} h-100">
+                            <div class="card-header bg-white d-flex justify-content-between align-items-center">
+                                <strong>Заказ #{{ order.id }}</strong>
+                                <small class="text-muted">{{ order.created_at|date:"d.m.Y H:i" }}</small>
+                            </div>
+                            <div class="card-body">
+                                <p class="card-text mb-2">
+                                    <i class="bi bi-telephone"></i>
+                                    {{ order.user.phone|default:"— без телефона" }}
+                                </p>
+                                <p class="card-text mb-2">
+                                    <i class="bi bi-geo-alt"></i>
+                                    {% if order.order_type == 'delivery' %}
+                                        {{ order.address|default:"— адрес не указан" }}
+                                    {% else %}
+                                        🏪 Самовывоз
+                                    {% endif %}
+                                </p>
+                                <hr>
+                                <h6 class="mb-2">Позиции:</h6>
+                                <ul class="list-group list-group-flush mb-3">
+                                    {% for item in order.items.all %}
+                                        <li class="list-group-item px-0 py-1">
+                                            <small>
+                                                {{ item.quantity }}× 
+                                                {% if item.item.category.emoji %}{{ item.item.category.emoji }} {% endif %}
+                                                {{ item.item.name }}
+                                                {% if item.item.price %} (₽{{ item.item.price }}){% endif %}
+                                            </small>
+                                        </li>
+                                    {% empty %}
+                                        <li class="list-group-item px-0 py-1 text-muted"><small>Нет позиций</small></li>
+                                    {% endfor %}
+                                </ul>
+                                <div class="d-flex justify-content-between align-items-center">
+                                    <strong class="text-success">Итого: ₽{{ order.total_price }}</strong>
+                                    <span class="badge bg-secondary">
+                                        {% if order.status == 'pending' %}Ожидает
+                                        {% elif order.status == 'confirmed' %}Готовится
+                                        {% elif order.status == 'completed' %}Готов
+                                        {% else %}{{ order.get_status_display }}
+                                        {% endif %}
+                                    </span>
+                                </div>
+                            </div>
+                            <div class="card-footer bg-white">
+                                <div class="btn-group w-100" role="group">
+                                    <a href="#" class="btn btn-outline-success btn-sm">
+                                        <i class="bi bi-check2-circle"></i> Принять
+                                    </a>
+                                    <a href="#" class="btn btn-outline-primary btn-sm">
+                                        <i class="bi bi-check-circle"></i> Готов
+                                    </a>
+                                    <a href="#" class="btn btn-outline-danger btn-sm">
+                                        <i class="bi bi-check-circle"></i> Отменить
+                                    </a>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    {% endwith %}
+                {% endfor %}
+            </div>
+        {% else %}
+            <div class="text-center py-5">
+                <div class="display-6 text-muted mb-3">📭 Нет заказов</div>
+                <p class="lead">Заказы появятся после оформления клиентами.</p>
+                <button class="btn btn-outline-secondary" onclick="location.reload()">Обновить</button>
+            </div>
+        {% endif %}
+    </div>
+{% endblock %}
