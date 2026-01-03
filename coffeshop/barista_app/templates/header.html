@@ -1,0 +1,26 @@
+{% load static %}
+
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <div class="d-flex align-items-baseline">
+        <h2 class="me-3 mb-0" style="display: inline-block;">
+            <a href="{% url 'barista_app:order_panel' %}" class="text-dark text-decoration-none">
+                <i class="bi bi-cup-hot"></i> Панель заказов
+            </a>
+        </h2>
+        <a href="{% url 'barista_app:accept_order' %}" class="text-dark text-decoration-none" style="font-weight: 500; font-size: 1.35rem; line-height: 1.2;">
+            Принять заказ
+        </a>
+    </div>
+    <div>
+        <span class="me-3">
+            <i class="bi bi-person"></i>
+            {{ user.username }}
+        </span>
+        <a href="{% url 'logout' %}" class="btn btn-outline-danger btn-sm">
+            <i class="bi bi-box-arrow-right"></i> Выйти
+        </a>
+        <button class="btn btn-outline-primary btn-sm ms-2" onclick="location.reload()">
+            <i class="bi bi-arrow-clockwise"></i> Обновить
+        </button>
+    </div>
+</div>

@@ -1,0 +1,125 @@
+{% extends 'base.html' %}
+{% load static %}
+
+{% block title %}Принять заказ • CoffeeShop{% endblock %}
+
+{% block content %}
+<div class="container py-4">
+    <div class="d-flex justify-content-between align-items-center mb-4">
+        <h1><i class="bi bi-receipt"></i> Новый заказ</h1>
+    </div>
+
+    <div class="row">
+        <!-- Корзина -->
+        <div class="col-12 col-md-4 col-lg-4 mb-5">
+            <div class="card">
+                <div class="card-header bg-success text-white">
+                    <h5><i class="bi bi-cart"></i> Корзина ({{ cart_items|length }})</h5>
+                </div>
+                <div class="card-body">
+                    {% if cart_items %}
+                        <ul class="list-group list-group-flush mb-3">
+                            {% for cart_item in cart_items %}
+                                <li class="list-group-item">
+                                    <div class="d-flex justify-content-between">
+                                        <span>{{ cart_item.item.name }}</span>
+                                        <strong>₽{{ cart_item.total_price }}</strong>
+                                    </div>
+                                    <!-- Форма обновления количества -->
+                                    <form method="post" action="{% url 'barista_app:cart_update' %}" class="mt-2">
+                                        {% csrf_token %}
+                                        <input type="hidden" name="item_id" value="{{ cart_item.item.id }}">
+                                        <div class="input-group" style="max-width: 150px;">
+                                            <button type="submit" name="quantity"
+                                                    value="{{ cart_item.quantity|add:"-1" }}"
+                                                    class="btn btn-outline-secondary">–</button>
+                                            <input type="text" class="form-control text-center"
+                                                value="{{ cart_item.quantity }}" readonly style="max-width:50px">
+                                            <button type="submit" name="quantity"
+                                                    value="{{ cart_item.quantity|add:"1" }}"
+                                                    class="btn btn-outline-secondary">+</button>
+                                        </div>
+                                    </form>
+                                </li>
+                            {% endfor %}
+                        </ul>
+                        <p class="fs-5"><strong>Итого: ₽{{ cart_total }}</strong></p>
+
+                        <!-- Форма оформления -->
+                        <form method="post" action="{% url 'barista_app:create_order' %}">
+                            {% csrf_token %}
+                            <div class="mb-2">
+                                <input type="text" name="phone" class="form-control form-control-sm"
+                                    placeholder="Телефон клиента" required>
+                            </div>
+                            <div class="mb-2">
+                                <select name="order_type" class="form-select form-select-sm" required>
+                                    <option value="pickup">Самовывоз</option>
+                                    <option value="delivery">Доставка</option>
+                                </select>
+                            </div>
+                            <div class="mb-2 delivery-field" style="display:none;">
+                                <input type="text" name="address" class="form-control form-control-sm"
+                                    placeholder="Адрес доставки">
+                            </div>
+                            <button type="submit" class="btn btn-primary w-100 btn-sm">
+                                Оформить заказ
+                            </button>
+                        </form>
+
+                        <!-- Кнопка очистки -->
+                        <form method="post" action="{% url 'barista_app:cart_clear' %}" class="mt-2">
+                            {% csrf_token %}
+                            <button type="submit" class="btn btn-outline-danger w-100 btn-sm">
+                                Очистить корзину
+                            </button>
+                        </form>
+                    {% else %}
+                        <p class="text-muted">Корзина пуста</p>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+
+        <!-- Меню -->
+        {% for category in categories %}
+            <section class="mb-5">
+                <h3>{{ category.emoji }} {{ category.name }}</h3>
+                <div class="row g-3">
+                    {% for item in category.items.all %}
+                        <div class="col-12 col-md-4 col-lg-4">
+                            <div class="card h-100">
+                                {% if item.image %}
+                                    <img src="{{ item.image.url }}" class="card-img-top" style="height:370px; object-fit:cover">
+                                {% endif %}
+                                <div class="card-body">
+                                    <h5>{{ item.name }}</h5>
+                                    <p class="text-muted small">{{ item.description|truncatewords:55 }}</p>
+                                    <div class="d-flex justify-content-between align-items-center">
+                                        <strong class="text-success fs-3">₽{{ item.price }}</strong>
+                                        <!-- Форма добавления -->
+                                        <form method="post" action="{% url 'barista_app:cart_add' %}" style="display:inline;">
+                                            {% csrf_token %}
+                                            <input type="hidden" name="item_id" value="{{ item.id }}">
+                                            <button type="submit" class="btn btn-success btn-sm">
+                                                <i class="bi bi-cart-plus"></i> В заказ
+                                            </button>
+                                        </form>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    {% endfor %}
+                </div>
+            </section>
+        {% endfor %}
+    </div>
+</div>
+
+<script>
+    document.querySelector('[name="order_type"]')?.addEventListener('change', e => {
+        const isDelivery = e.target.value === 'delivery';
+        document.querySelector('.delivery-field').style.display = isDelivery ? 'block' : 'none';
+    });
+</script>
+{% endblock %}
