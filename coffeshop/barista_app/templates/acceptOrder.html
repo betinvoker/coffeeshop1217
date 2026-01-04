@@ -9,6 +9,18 @@
         <h1><i class="bi bi-receipt"></i> Новый заказ</h1>
     </div>
 
+    <!-- Поле поиска -->
+    <div class="row mb-4">
+        <div class="col-12">
+            <div class="input-group input-group-lg">
+                <span class="input-group-text bg-white border-end-0" style="font-size: 1.5rem; padding: 0.50rem 1rem;">
+                    <i class="bi bi-search text-muted"></i>
+                </span>
+                <input type="text" id="menu-search" class="form-control form-control-lg py-3 fs-4" placeholder="Начните вводить название напитка или десерта…" style="border-start-radius: 0;">
+            </div>
+        </div>
+    </div>
+
     <div class="row">
         <!-- Корзина -->
         <div class="col-12 col-md-4 col-lg-4 mb-5">
@@ -94,7 +106,9 @@
                                 {% endif %}
                                 <div class="card-body">
                                     <h5>{{ item.name }}</h5>
-                                    <p class="text-muted small">{{ item.description|truncatewords:55 }}</p>
+                                    <p class="text-muted small">{{ item.description|truncatewords:40 }}</p>
+                                </div>
+                                <div class="card-footer bg-transparent">
                                     <div class="d-flex justify-content-between align-items-center">
                                         <strong class="text-success fs-3">₽{{ item.price }}</strong>
                                         <!-- Форма добавления -->
@@ -120,6 +134,39 @@
     document.querySelector('[name="order_type"]')?.addEventListener('change', e => {
         const isDelivery = e.target.value === 'delivery';
         document.querySelector('.delivery-field').style.display = isDelivery ? 'block' : 'none';
+    });
+
+    document.addEventListener('DOMContentLoaded', function() {
+        const searchInput = document.getElementById('menu-search');
+        if (!searchInput) return;
+
+        // Сохраняем исходные данные для сброса
+        const cards = document.querySelectorAll('.card.h-100');
+        const cardData = Array.from(cards).map(card => ({
+            element: card,
+            name: card.querySelector('.card-body h5')?.textContent.toLowerCase() || '',
+            description: card.querySelector('.card-body p')?.textContent.toLowerCase() || '',
+            category: card.closest('section').querySelector('h3')?.textContent.toLowerCase() || ''
+        }));
+
+        searchInput.addEventListener('input', function() {
+            const query = this.value.trim().toLowerCase();
+
+            cardData.forEach(({ element, name, description, category }) => {
+                const match = query === '' ||
+                    name.includes(query) ||
+                    description.includes(query) ||
+                    category.includes(query);
+
+                element.closest('.col-12').style.display = match ? '' : 'none';
+            });
+
+            // Скрываем пустые секции
+            document.querySelectorAll('section').forEach(section => {
+                const visibleCards = section.querySelectorAll('.col-12:not([style*="display: none"])');
+                section.style.display = visibleCards.length > 0 ? '' : 'none';
+            });
+        });
     });
 </script>
 {% endblock %}
