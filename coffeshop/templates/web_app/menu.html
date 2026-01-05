@@ -1,0 +1,22 @@
+{% extends 'web_app/base.html' %}
+{% load static %}
+
+{% block content %}
+<h1>Меню</h1>
+{% for category in categories %}
+  <h2>{{ category }}</h2>
+  {% for item in category.items.all %}
+    <div>
+      <h3>{{ item.name }} — {{ item.price }} ₽</h3>
+      <p>{{ item.description }}</p>
+      {% if item.image %}
+        <img src="{{ item.image.url }}" width="100">
+      {% endif %}
+      <form method="post" action="{% url 'web_app:add_to_cart' item.id %}">
+        {% csrf_token %}
+        <button type="submit">➕ В корзину</button>
+      </form>
+    </div>
+  {% endfor %}
+{% endfor %}
+{% endblock %}

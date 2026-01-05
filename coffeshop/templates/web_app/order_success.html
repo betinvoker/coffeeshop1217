@@ -1,0 +1,7 @@
+{% extends 'web_app/base.html' %}
+
+{% block content %}
+<h1>✅ Заказ оформлен!</h1>
+<p>Спасибо за заказ! Бариста уже готовит ваш напиток ☕</p>
+<a href="{% url 'web_app:menu' %}">→ Вернуться в меню</a>
+{% endblock %}

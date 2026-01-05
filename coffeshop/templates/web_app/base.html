@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Кофейня — заказ онлайн</title>
+</head>
+<body>
+    <nav>
+        <a href="{% url 'web_app:menu' %}">Меню</a> |
+        <a href="{% url 'web_app:cart' %}">Корзина</a> |
+        {% if user.is_authenticated %}
+            Привет, {{ user.username }}! <a href="{% url 'logout' %}">Выйти</a>
+        {% else %}
+            <a href="{% url 'login' %}">Войти</a>
+        {% endif %}
+    </nav>
+    <hr>
+    {% block content %}{% endblock %}
+</body>
+</html>

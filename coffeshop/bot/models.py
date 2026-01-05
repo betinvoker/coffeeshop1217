@@ -1,5 +1,5 @@
-# bot_app/models.py
 from django.db import models
+from django.contrib.auth.models import User
 
 class TelegramUser(models.Model):
     chat_id = models.BigIntegerField(unique=True)
@@ -9,6 +9,26 @@ class TelegramUser(models.Model):
     def __str__(self):
         return f"User {self.chat_id}"
 
+class Customer(models.Model):
+    # Может быть связан с User (веб) ИЛИ с TelegramUser (бот)
+    user = models.OneToOneField(User, null=True, blank=True, on_delete=models.CASCADE)
+    telegram_user = models.OneToOneField(TelegramUser, null=True, blank=True, on_delete=models.CASCADE)
+    
+    # Общая информация
+    phone = models.CharField(max_length=20, blank=True, null=True)
+    name = models.CharField(max_length=255, blank=True)
+
+    class Meta:
+        verbose_name = "Клиент"
+        verbose_name_plural = "Клиенты"
+
+    def __str__(self):
+        if self.user:
+            return f"Web: {self.user.username}"
+        if self.telegram_user:
+            return f"TG: {self.telegram_user.name or self.telegram_user.chat_id}"
+        return "Unknown"
+    
 class Category(models.Model):
     name = models.CharField("Название", max_length=100, unique=True)
     slug = models.SlugField("Слаг", max_length=100, unique=True, blank=True)
@@ -65,13 +85,13 @@ class MenuItem(models.Model):
         return None
 
 class Cart(models.Model):
-    user = models.OneToOneField(TelegramUser, on_delete=models.CASCADE)
+    customer = models.OneToOneField(Customer, on_delete=models.CASCADE)
     created_at = models.DateTimeField(auto_now_add=True)
     
     class Meta:
         verbose_name = "Корзина клиента"
         verbose_name_plural = "Корзины клиентов"
-        ordering = ['user']
+        ordering = ['customer']
 
     def total_price(self):
         return sum(item.total_price() for item in self.items.all())
@@ -103,7 +123,7 @@ class Order(models.Model):
         ('canceled', 'Отменён'),
     ]
     
-    user = models.ForeignKey(TelegramUser, on_delete=models.CASCADE)
+    customer = models.ForeignKey(Customer, on_delete=models.CASCADE)
     order_type = models.CharField(max_length=10, choices=ORDER_TYPES)
     address = models.CharField(max_length=255, blank=True, null=True)
     total_price = models.DecimalField(max_digits=8, decimal_places=2)
@@ -117,7 +137,7 @@ class Order(models.Model):
     class Meta:
         verbose_name = "Заказ клиента"
         verbose_name_plural = "Заказы клиентов"
-        ordering = ['user', 'order_type', 'address', 'total_price', 'status']
+        ordering = ['customer', 'order_type', 'address', 'total_price', 'status']
     
     def __str__(self):
         return f"Order #{self.id} - {self.get_order_type_display()}"

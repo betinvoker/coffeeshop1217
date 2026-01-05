@@ -9,7 +9,9 @@ from telegram.ext import (
 from telegram.error import BadRequest
 from telegram.constants import ParseMode
 from asgiref.sync import sync_to_async
-from .models import TelegramUser, Category, MenuItem, Cart, CartItem, Order, OrderItem
+from .models import (
+    TelegramUser, Customer, Category, MenuItem, Cart, CartItem, Order, OrderItem
+)
 
 logger = logging.getLogger(__name__)
 
@@ -40,18 +42,24 @@ def get_items_by_category(slug):
 def get_user_orders(user):
     return list(
         Order.objects
-        .filter(user=user)
+        .filter(customer__telegram_user=user)
         .prefetch_related('items__item')  # опционально: для деталей
         .order_by('-created_at')[:10]  # последние 10 заказов
     )
 
 @sync_to_async
-def add_item_to_cart_db(user, item_id):
+def add_item_to_cart_db(user: TelegramUser, item_id: int) -> str:
     logger.info(f"Добавление товара {item_id} в корзину пользователя {user.chat_id}")
     try:
-        # ✅ select_related здесь — безопасно, т.к. внутри sync_to_async
+        # 🔑 Получаем Customer
+        customer = Customer.objects.get_or_create(
+            telegram_user=user,
+            defaults={'name': user.name or 'Клиент', 'phone': user.phone}
+        )[0]
+
         item = MenuItem.objects.select_related('category').get(id=item_id)
-        cart, _ = Cart.objects.get_or_create(user=user)
+        # 🔑 Используем customer
+        cart, _ = Cart.objects.get_or_create(customer=customer)  # ← customer!
         cart_item, created = CartItem.objects.get_or_create(
             cart=cart, item=item, defaults={'quantity': 1}
         )
@@ -80,7 +88,7 @@ async def decrease_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         cart_item = await sync_to_async(
             CartItem.objects.select_related('item').get
-        )(id=item_id, cart__user=user)
+        )(id=item_id, cart__customer__telegram_user=user)
 
         if cart_item.quantity > 1:
             cart_item.quantity -= 1
@@ -112,7 +120,7 @@ async def remove_from_cart(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         deleted, _ = await sync_to_async(
-            CartItem.objects.filter(id=item_id, cart__user=user).delete)()
+            CartItem.objects.filter(id=item_id, cart__customer__telegram_user=user).delete)()
 
         if deleted == 0:
             await query.answer("❌ Товар не найден.", show_alert=True)
@@ -123,13 +131,13 @@ async def remove_from_cart(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("⚠️ Не удалось удалить товар.", show_alert=True)
 
 @sync_to_async
-def get_user_cart(user):
+def get_user_cart(user: TelegramUser):
     try:
-        # ❗ Используем select_related('item'), чтобы избежать N+1 и ленивой загрузки
-        cart = Cart.objects.select_related('user').get(user=user)
-        items = list(cart.items.select_related('item').all())  # ← select_related('item')!
+        customer = Customer.objects.get(telegram_user=user)
+        cart = Cart.objects.select_related('customer').get(customer=customer)
+        items = list(cart.items.select_related('item').all())
         return cart, items
-    except Cart.DoesNotExist:
+    except (Cart.DoesNotExist, Customer.DoesNotExist):
         return None, []
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -298,20 +306,21 @@ async def show_cart(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # === СЛУЧАЙ 1: корзина пуста ===
     if not items:
+        text = "🛒 *Ваша корзина пуста.*\n\nВыберите товары в меню."
         keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data='start')]]
         try:
             await safe_edit_or_send(
                 query,
-                message,
+                text,
                 reply_markup=InlineKeyboardMarkup(keyboard),
                 parse_mode="Markdown"
             )
         except BadRequest as e:
             if "Message is not modified" in str(e):
-                # Игнорируем — сообщение уже актуально
                 logger.debug("Ignored 'Message is not modified' error")
             else:
-                raise  # поднимаем остальные ошибки
+                raise
+        return
 
     # === СЛУЧАЙ 2: есть товары — формируем продвинутую клавиатуру ===
     message = "🛒 *Ваша корзина:*\n\n"
@@ -510,11 +519,12 @@ async def address_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return await create_order(update, context)
 
 @sync_to_async
-def create_order_in_db(user, order_type, address, items):
+def create_order_in_db(user: TelegramUser, order_type, address, items):
+    customer = Customer.objects.get(telegram_user=user)
     total = sum(item.item.price * item.quantity for item in items)
-    
+
     order = Order.objects.create(
-        user=user,
+        customer=customer,
         order_type=order_type,
         address=address if order_type == 'delivery' else None,
         total_price=total
@@ -528,7 +538,7 @@ def create_order_in_db(user, order_type, address, items):
         )
     
     # Очистка корзины
-    Cart.objects.filter(user=user).delete()
+    Cart.objects.filter(customer__telegram_user=user).delete()
     
     return order
 

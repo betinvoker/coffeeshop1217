@@ -23,6 +23,7 @@ from django.contrib.auth import views as auth_views
 urlpatterns = [
     path('admin/', admin.site.urls),
     path('orderPanel/', include('barista_app.urls')),
+    path('shop/', include('web_app.urls')),
     path('login/', auth_views.LoginView.as_view(), name='login'),
     path('login/', auth_views.LogoutView.as_view(), name='logout'),
 ]

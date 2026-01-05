@@ -1,4 +1,4 @@
-{% extends 'base.html' %}
+{% extends 'barista_app/base.html' %}
 {% load static %}
 {% block title %}Панель заказов • CoffeeShop{% endblock %}
 
@@ -46,7 +46,7 @@
         </h3>
         <div class="row g-3 mb-5">
             {% for order in pending_orders %}
-                {% include 'order_card.html' %}
+                {% include 'barista_app/order_card.html' %}
             {% endfor %}
         </div>
     {% endif %}
@@ -59,7 +59,7 @@
         </h3>
         <div class="row g-3 mb-5">
             {% for order in active_orders %}
-                {% include 'order_card.html' %}
+                {% include 'barista_app/order_card.html' %}
             {% endfor %}
         </div>
     {% endif %}
@@ -72,7 +72,7 @@
         </h3>
         <div class="row g-3">
             {% for order in completed_orders %}
-                {% include 'order_card.html' %}
+                {% include 'barista_app/order_card.html' %}
             {% endfor %}
         </div>
     {% endif %}

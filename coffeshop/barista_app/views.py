@@ -3,16 +3,16 @@ from django.shortcuts import render, get_object_or_404, redirect
 from django.contrib.admin.views.decorators import staff_member_required
 from django.http import HttpResponse, JsonResponse
 from django.db import transaction
-from django.shortcuts import redirect
 from django.contrib import messages
-from bot.models import TelegramUser, Category, MenuItem, Cart, CartItem, Order, OrderItem
+from bot.models import Customer, TelegramUser, Category, MenuItem, Cart, CartItem, Order, OrderItem
 
 @staff_member_required(login_url='/login/')
 def order_panel(request):
-    # Базовый QuerySet
-    orders = Order.objects.select_related('user') \
-                          .prefetch_related('items__item__category') \
-                          .order_by('-created_at')
+    orders = Order.objects.select_related(
+        'customer',
+        'customer__user',           # если заказ от веб-пользователя
+        'customer__telegram_user'   # если заказ от Telegram)
+        ).prefetch_related('items__item__category').order_by('-created_at')
 
     # Фильтрация
     order_id = request.GET.get('order_id')
@@ -28,7 +28,7 @@ def order_panel(request):
     active_orders = orders.filter(status__in=['confirmed'])   # В работе (только "Подтверждён")
     completed_orders = orders.filter(status__in=['completed', 'canceled'])  # Готов / Отменён
 
-    return render(request, 'orderPanel.html', {
+    return render(request, 'barista_app/orderPanel.html', {
         'pending_orders': pending_orders,
         'active_orders': active_orders,
         'completed_orders': completed_orders,
@@ -66,7 +66,7 @@ def accept_order(request):
         except MenuItem.DoesNotExist:
             continue
 
-    return render(request, 'acceptOrder.html', {
+    return render(request, 'barista_app/acceptOrder.html', {
         'categories': categories,
         'cart_items': cart_items,
         'cart_total': total,
@@ -142,12 +142,17 @@ def create_order(request):
         fake_chat_id = -abs(hash_id)
 
         # Находим или создаём клиента
-        user, created = TelegramUser.objects.get_or_create(
+        telegram_user, created = TelegramUser.objects.get_or_create(
             phone=phone,
             defaults={
                 'name': 'Клиент',
                 'chat_id': fake_chat_id
             }
+        )
+
+        customer, _ = Customer.objects.get_or_create(
+            telegram_user=telegram_user,
+            defaults={'name': 'Клиент', 'phone': phone}
         )
 
         # Берём корзину из сессии
@@ -174,7 +179,7 @@ def create_order(request):
 
         # Создаём заказ
         order = Order.objects.create(
-            user=user,
+            customer=customer,
             order_type=order_type,
             address=address,
             total_price=total,

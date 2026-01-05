@@ -1,6 +1,6 @@
 # bot_app/admin.py
 from django.contrib import admin
-from .models import TelegramUser, Category, MenuItem, Cart, CartItem, Order, OrderItem
+from .models import TelegramUser, Customer, Category, MenuItem, Cart, CartItem, Order, OrderItem
 from django.utils.html import format_html
 
 @admin.register(Category)
@@ -28,13 +28,13 @@ class MenuItemAdmin(admin.ModelAdmin):
 
 @admin.register(Order)
 class OrderAdmin(admin.ModelAdmin):
-    list_display = ('id', 'user', 'order_type', 'total_price', 'status')
+    list_display = ('id', 'customer', 'order_type', 'total_price', 'status')
     list_filter = ('order_type', 'status')
 
 @admin.register(Cart)
 class CartAdmin(admin.ModelAdmin):
-    list_display = ('id', 'user', 'created_at')
-    list_filter = ('user',)
+    list_display = ('id', 'customer', 'created_at')
+    list_filter = ('customer',)
 
 @admin.register(CartItem)
 class CartItemAdmin(admin.ModelAdmin):
@@ -48,3 +48,4 @@ class OrderItemAdmin(admin.ModelAdmin):
 
 # Зарегистрируйте остальные модели аналогично
 admin.site.register(TelegramUser)
+admin.site.register(Customer)
